@@ -890,11 +890,19 @@ enum {
   F_COUNT
 };
 
+#define F_SEPARATOR F_COUNT
+#define F_CUSTOM_BASE (F_COUNT + 1)
+#define MAX_CUSTOM 16
+#define MAX_FIELDS (F_COUNT + MAX_CUSTOM + 16)
+
 static int field_enabled[F_COUNT];
-static int field_order[F_COUNT];
+static int field_order[MAX_FIELDS];
 static int field_line[F_COUNT]; // line index for each field (-1 if not shown)
 static int current_field = -1;  // which field is currently being gathered
 static int field_count = 0;
+static char custom_label[MAX_CUSTOM][64];
+static char custom_value[MAX_CUSTOM][256];
+static int custom_count = 0;
 static int is_refresh_pass = 0;     // 1 during the animation refresh tick
 static char label_color[16] = "35"; // default magenta
 static int config_height = 0;       // 0 = auto (match info lines)
@@ -1152,7 +1160,7 @@ static void load_config(void) {
         extra_disk_count++;
       }
       // also enable disk field if not already
-      if (!field_enabled[F_DISK] && field_count < F_COUNT) {
+      if (!field_enabled[F_DISK] && field_count < MAX_FIELDS) {
         field_enabled[F_DISK] = 1;
         field_order[field_count++] = F_DISK;
       }
@@ -1185,11 +1193,37 @@ static void load_config(void) {
       continue;
     }
 
+    // Separator: a line of dashes
+    if (strcmp(line, "---") == 0) {
+      if (field_count < MAX_FIELDS)
+        field_order[field_count++] = F_SEPARATOR;
+      continue;
+    }
+
+    // Custom static field: custom_Label=value
+    if (strncmp(line, "custom_", 7) == 0) {
+      char *eq = strchr(line + 7, '=');
+      if (eq && eq > line + 7 && custom_count < MAX_CUSTOM &&
+          field_count < MAX_FIELDS) {
+        int llen = (int)(eq - (line + 7));
+        if (llen > (int)sizeof(custom_label[0]) - 1)
+          llen = (int)sizeof(custom_label[0]) - 1;
+        memcpy(custom_label[custom_count], line + 7, llen);
+        custom_label[custom_count][llen] = '\0';
+        strncpy(custom_value[custom_count], eq + 1,
+                sizeof(custom_value[0]) - 1);
+        custom_value[custom_count][sizeof(custom_value[0]) - 1] = '\0';
+        field_order[field_count++] = F_CUSTOM_BASE + custom_count;
+        custom_count++;
+      }
+      continue;
+    }
+
     // Match field name
     for (int i = 0; field_map[i].name; i++) {
       if (strcasecmp(line, field_map[i].name) == 0) {
         int id = field_map[i].id;
-        if (!field_enabled[id] && field_count < F_COUNT) {
+        if (!field_enabled[id] && field_count < MAX_FIELDS) {
           field_enabled[id] = 1;
           field_order[field_count++] = id;
         }
@@ -4032,6 +4066,9 @@ int main(int argc, char **argv) {
           "    os, host, kernel, uptime, packages, shell, display, wm,\n"
           "    displaymanager, theme, icons, font, cursor, terminal, cpu,\n"
           "    gpu, memory, swap, disk, ip, battery, locale, colors\n\n"
+          "  Separators and custom fields:\n"
+          "    ---                      Blank line separator\n"
+          "    custom_Label=value       Static field (e.g. custom_Pronouns=he/him)\n\n"
           "  Extra disks:\n"
           "    disk=/home               Show additional mount point\n"
           "    disk=/data               (repeat for multiple mounts)\n\n"
@@ -4244,13 +4281,18 @@ int main(int argc, char **argv) {
     gather_title();
     for (int i = 0; i < field_count; i++) {
       int id = field_order[i];
-      if (id == F_COLORS) {
+      if (id == F_SEPARATOR) {
+        add_line("");
+      } else if (id >= F_CUSTOM_BASE && id < F_CUSTOM_BASE + MAX_CUSTOM) {
+        int ci = id - F_CUSTOM_BASE;
+        add_info(custom_label[ci], "%s", custom_value[ci]);
+      } else if (id == F_COLORS) {
         add_line("");
         add_line("\033[40m   \033[41m   \033[42m   \033[43m   "
                  "\033[44m   \033[45m   \033[46m   \033[47m   \033[0m");
         add_line("\033[100m   \033[101m   \033[102m   \033[103m   "
                  "\033[104m   \033[105m   \033[106m   \033[107m   \033[0m");
-      } else if (fns[id]) {
+      } else if (id < F_COUNT && fns[id]) {
         current_field = id;
         fns[id]();
       }
@@ -4265,8 +4307,22 @@ int main(int argc, char **argv) {
 
   float A = 0.0f;
   float B = 0.0f;
-  float K1 = 37.0f * logo_height / 36.0f;
+  float K1 = 37.0f * logo_height / 36.0f * size_scale;
   const float K2 = 5.5f;
+
+  // Compute the face-on (A=0, B=0) projection extent from the point
+  // cloud. This is deterministic and sets a fixed frame height.
+  float face_up = 0, face_dn = 0;
+  for (int i = 0; i < POINT_COUNT; i++) {
+    float zc = PZ[i] + K2;
+    if (zc < 0.1f) continue;
+    float ys = K1 * PY[i] / zc;
+    if (ys > face_up) face_up = ys;
+    if (-ys > face_dn) face_dn = -ys;
+  }
+  // Place y_center so the logo top lands at row 1 (row 0 is padding)
+  float fixed_y_center = face_up + 1.0f;
+
   // Pre-compute Blinn-Phong half-vector (view direction is constant (0,0,-1))
   const float hx0 = (light_x + 0.0f), hy0 = (light_y + 0.0f), hz0 = (light_z - 1.0f);
   const float hl0 = sqrtf(hx0 * hx0 + hy0 * hy0 + hz0 * hz0);
@@ -4278,6 +4334,15 @@ int main(int argc, char **argv) {
   atexit(cleanup);
 
   int fetch_start = show_info ? 1 : 0;
+  // Tighten render_height to fit the face-on logo + info,
+  // but not when the user explicitly set --height
+  if (config_height == 0) {
+    int logo_bottom = (int)(fixed_y_center + face_dn) + 2;
+    int info_bottom = show_info ? fetch_start + fetch_line_count + 1 : 0;
+    int needed = logo_bottom > info_bottom ? logo_bottom : info_bottom;
+    if (needed < render_height)
+      render_height = needed;
+  }
 
   if (tcgetattr(STDIN_FILENO, &orig_termios) == 0) {
     termios_saved = 1;
@@ -4441,9 +4506,8 @@ int main(int argc, char **argv) {
     float cB = cosf(B), sB = sinf(B);
 
     const float lx = light_x, ly = light_y, lz = light_z;
-    const float y_center = (!layout_stacked && fetch_line_count > 0 &&
-                            fetch_line_count + 2 <= render_height)
-                              ? fetch_start + fetch_line_count * 0.5f
+    const float y_center = (!layout_stacked && show_info)
+                              ? fixed_y_center
                               : render_height * 0.5f;
     const int smax = shading_count - 1;
     const float half_aw = (float)anim_width * 0.5f;
