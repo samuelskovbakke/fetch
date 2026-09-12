@@ -231,6 +231,13 @@ battery
 locale
 colors
 
+# separators (blank line between groups)
+# ---
+
+# custom static fields
+# custom_Pronouns=he/him
+# custom_Website=example.com
+
 # extra disks (add more mount points)
 # disk=/home
 # disk=/data
